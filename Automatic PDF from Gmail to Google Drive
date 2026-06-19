@@ -1,0 +1,234 @@
+/*************** CONFIG ***************/
+
+// Người gửi cố định: nhận cả email mới và email cũ
+const FROM_QUERY = "(from:bantindauthau@taichinhdautu.vn OR from:bantin@baodauthau.vn)";
+
+// 3 folder Google Drive
+const TBMT_FOLDER_ID = "1Uc-_3HfPHc77TkNyiiX_xGa2mJl0C-iC";
+const KHLCNT_FOLDER_ID = "1eFtrDDUJQ6NTbMicFJePIvUuuXx1-i-U";
+const KQDT_FOLDER_ID = "1oj4THsgXr-6hcKJFr_P5vw31Yjl_jdxm";
+
+// 2 label của CODE mình
+// Chỉ email có 1 trong 2 label này mới bị bỏ qua, không scan lại
+const BACKFILL_DONE_LABEL = "PDF_BACKFILL_SCANNED_TO_ZOHO";
+const SAVED_LABEL = "PDF_SAVED_TO_ZOHO_PROCUREMENT";
+
+/**************************************/
+
+
+/**
+ * FUNCTION 1:
+ * Kéo file cũ nhiều năm.
+ * Em tự bấm Run function này.
+ * Mỗi lần chạy tối đa 100 email/thread.
+ * KHÔNG gắn trigger function này.
+ *
+ * Logic:
+ * - Scan tất cả năm cũ
+ * - Scan cả 2 email gửi: bantindauthau@taichinhdautu.vn và bantin@baodauthau.vn
+ * - Chỉ bỏ qua email đã có label PDF_BACKFILL... hoặc PDF_SAVED...
+ * - Các label khác như Thong bao / Ket qua / Deleted Messages vẫn scan bình thường
+ */
+function backfillOldPdfManual() {
+  const query =
+    `in:anywhere ${FROM_QUERY} has:attachment filename:pdf ` +
+    `-label:${BACKFILL_DONE_LABEL} -label:${SAVED_LABEL}`;
+
+  processProcurementPdfEmails(query, 100, true);
+}
+
+
+/**
+ * FUNCTION 2:
+ * Dùng cho mail mới.
+ * Function này mới gắn trigger tự động mỗi ngày 5pm - 6pm.
+ *
+ * Logic:
+ * - Chỉ scan mail trong 7 ngày gần nhất
+ * - Scan cả 2 email gửi: bantindauthau@taichinhdautu.vn và bantin@baodauthau.vn
+ * - Chỉ bỏ qua email đã có label PDF_BACKFILL... hoặc PDF_SAVED...
+ * - Các label khác như Thong bao / Ket qua / Deleted Messages vẫn scan bình thường
+ */
+function autoSaveNewPdfTrigger() {
+  const query =
+    `in:anywhere ${FROM_QUERY} has:attachment filename:pdf newer_than:7d ` +
+    `-label:${BACKFILL_DONE_LABEL} -label:${SAVED_LABEL}`;
+
+  processProcurementPdfEmails(query, 50, false);
+}
+
+
+/**
+ * Core xử lý chung cho cả file cũ và file mới
+ */
+function processProcurementPdfEmails(gmailQuery, maxThreads, markBackfillScanned) {
+  const folders = {
+    TBMT: DriveApp.getFolderById(TBMT_FOLDER_ID),
+    KHLCNT: DriveApp.getFolderById(KHLCNT_FOLDER_ID),
+    KQDT: DriveApp.getFolderById(KQDT_FOLDER_ID)
+  };
+
+  const backfillLabel = getOrCreateLabel(BACKFILL_DONE_LABEL);
+  const savedLabel = getOrCreateLabel(SAVED_LABEL);
+
+  const threads = GmailApp.search(gmailQuery, 0, maxThreads);
+
+  let savedCount = 0;
+  let duplicateCount = 0;
+  let unknownCount = 0;
+  let scannedThreadCount = 0;
+  let labeledBackfillCount = 0;
+  let labeledSavedCount = 0;
+
+  Logger.log("========== START ==========");
+  Logger.log("GMAIL QUERY: " + gmailQuery);
+  Logger.log("THREADS FOUND: " + threads.length);
+
+  threads.forEach(thread => {
+    let scannedThisThread = false;
+    let recognizedPdfInThisThread = false;
+    let savedOrDuplicateInThisThread = false;
+
+    const messages = thread.getMessages();
+
+    messages.forEach(message => {
+      const subject = message.getSubject() || "";
+
+      const attachments = message.getAttachments({
+        includeInlineImages: false,
+        includeAttachments: true
+      });
+
+      attachments.forEach(att => {
+        const originalName = att.getName() || "";
+
+        if (!originalName.toLowerCase().endsWith(".pdf")) {
+          return;
+        }
+
+        scannedThisThread = true;
+
+        const route = detectPdfRoute(originalName, subject);
+
+        if (!route) {
+          Logger.log("SKIP UNKNOWN: " + originalName + " | Subject: " + subject);
+          unknownCount++;
+          return;
+        }
+
+        recognizedPdfInThisThread = true;
+
+        const folder = folders[route];
+        const finalFileName = cleanFileName(originalName);
+
+        // Chống trùng theo tên file chính xác trong đúng folder đích.
+        // Ví dụ:
+        // TBMT_1_12_2025.pdf KHÁC TBMT_1_12_2026.pdf
+        if (folder.getFilesByName(finalFileName).hasNext()) {
+          Logger.log("SKIP DUPLICATE IN DRIVE: " + finalFileName);
+          duplicateCount++;
+          savedOrDuplicateInThisThread = true;
+          return;
+        }
+
+        folder.createFile(att.copyBlob()).setName(finalFileName);
+
+        savedCount++;
+        savedOrDuplicateInThisThread = true;
+
+        Logger.log("SAVED " + route + ": " + finalFileName);
+      });
+    });
+
+    if (scannedThisThread) {
+      scannedThreadCount++;
+    }
+
+    // Backfill: nếu thread có PDF nhận diện được thuộc TBMT/KHLCNT/KQDT
+    // thì gắn label BACKFILL của code mình để lần sau không scan lại.
+    if (markBackfillScanned && recognizedPdfInThisThread) {
+      thread.addLabel(backfillLabel);
+      labeledBackfillCount++;
+    }
+
+    // Nếu file đã lưu hoặc đã có sẵn trong Drive
+    // thì gắn label SAVED của code mình để lần sau không scan lại.
+    if (savedOrDuplicateInThisThread) {
+      thread.addLabel(savedLabel);
+      labeledSavedCount++;
+    }
+  });
+
+  Logger.log("========== SUMMARY ==========");
+  Logger.log("Threads found: " + threads.length);
+  Logger.log("Threads scanned: " + scannedThreadCount);
+  Logger.log("Saved: " + savedCount);
+  Logger.log("Skipped duplicate in Drive: " + duplicateCount);
+  Logger.log("Skipped unknown: " + unknownCount);
+  Logger.log("Backfill labels added: " + labeledBackfillCount);
+  Logger.log("Saved labels added: " + labeledSavedCount);
+  Logger.log("========== END ==========");
+}
+
+
+/**
+ * Phân loại PDF:
+ * - KQDT / kết quả -> KQDT
+ * - KHMT / KHLCNT / kế hoạch -> KHLCNT
+ * - TBMT / thông báo -> TBMT
+ *
+ * Lưu ý:
+ * Check KQDT trước TBMT để mail "Thông tin đấu thầu (kết quả)" không bị nhầm sang TBMT.
+ */
+function detectPdfRoute(fileName, subject) {
+  const text = normalizeText(fileName + " " + subject);
+
+  if (
+    text.includes("kqdt") ||
+    text.includes("ket qua")
+  ) {
+    return "KQDT";
+  }
+
+  if (
+    text.includes("khmt") ||
+    text.includes("khlcnt") ||
+    text.includes("ke hoach")
+  ) {
+    return "KHLCNT";
+  }
+
+  if (
+    text.includes("tbmt") ||
+    text.includes("thong bao")
+  ) {
+    return "TBMT";
+  }
+
+  return null;
+}
+
+
+function getOrCreateLabel(labelName) {
+  let label = GmailApp.getUserLabelByName(labelName);
+
+  if (!label) {
+    label = GmailApp.createLabel(labelName);
+  }
+
+  return label;
+}
+
+
+function normalizeText(s) {
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d");
+}
+
+
+function cleanFileName(name) {
+  return name.replace(/[\\/:*?"<>|]/g, "_").trim();
+}
