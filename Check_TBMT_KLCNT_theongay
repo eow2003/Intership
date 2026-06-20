@@ -1,0 +1,121 @@
+from pathlib import Path
+import unicodedata
+import re
+
+# ==========================================
+# CẤU HÌNH FOLDER GOOGLE DRIVE LOCAL
+# ==========================================
+
+BASE_DIR = Path(r"G:\My Drive\Zoho_Procurement")
+
+FOLDERS = {
+    "TBMT": BASE_DIR / "TBMT",
+    "KHLCNT": BASE_DIR / "KHLCNT",
+}
+
+
+# ==========================================
+# HÀM XỬ LÝ NGÀY + TÊN FILE
+# ==========================================
+
+def normalize_text(s: str) -> str:
+    s = str(s).lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.replace("đ", "d")
+    s = re.sub(r"[\/\\\s\-.]+", "_", s)
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_")
+
+
+def build_date_patterns(input_date: str):
+    """
+    Nhập: 01/12/2025 hoặc 1/12/2025
+    Match được nhiều kiểu tên file:
+    - 1_12_2025
+    - 01_12_2025
+    - 1-12-2025
+    - 01-12-2025
+    - 2025_12_01
+    - 01122025
+    """
+    parts = re.split(r"[\/\-._\s]+", input_date.strip())
+
+    if len(parts) != 3:
+        raise ValueError("Ngày phải nhập dạng dd/mm/yyyy. Ví dụ: 01/12/2025")
+
+    d = parts[0].lstrip("0") or "0"
+    m = parts[1].lstrip("0") or "0"
+    y = parts[2]
+
+    dd = d.zfill(2)
+    mm = m.zfill(2)
+
+    raw_patterns = [
+        f"{d}_{m}_{y}",
+        f"{dd}_{mm}_{y}",
+        f"{d}-{m}-{y}",
+        f"{dd}-{mm}-{y}",
+        f"{d}.{m}.{y}",
+        f"{dd}.{mm}.{y}",
+        f"{d}{m}{y}",
+        f"{dd}{mm}{y}",
+        f"{y}_{m}_{d}",
+        f"{y}_{mm}_{dd}",
+        f"{y}-{m}-{d}",
+        f"{y}-{mm}-{dd}",
+        f"{y}{mm}{dd}",
+    ]
+
+    return list(set(normalize_text(p) for p in raw_patterns))
+
+
+def check_files_by_date(input_date: str):
+    date_patterns = build_date_patterns(input_date)
+
+    print("=" * 70)
+    print(f"CHECK DATE: {input_date}")
+    print("PATTERNS:", " | ".join(date_patterns))
+    print("=" * 70)
+
+    total_found = 0
+
+    for folder_type, folder_path in FOLDERS.items():
+        print(f"\n--- CHECK {folder_type} ---")
+        print("Folder:", folder_path)
+
+        if not folder_path.exists():
+            print(f"❌ Không thấy folder: {folder_path}")
+            continue
+
+        found_files = []
+
+        for file_path in folder_path.iterdir():
+            if not file_path.is_file():
+                continue
+
+            file_name_norm = normalize_text(file_path.name)
+
+            if any(pattern in file_name_norm for pattern in date_patterns):
+                found_files.append(file_path)
+
+        if found_files:
+            print(f"✅ Tìm thấy {len(found_files)} file {folder_type}:")
+            for f in found_files:
+                print(" -", f.name)
+            total_found += len(found_files)
+        else:
+            print(f"❌ Không thấy file {folder_type} có ngày {input_date}")
+
+    print("\n" + "=" * 70)
+    print(f"TỔNG FILE TÌM THẤY: {total_found}")
+    print("=" * 70)
+
+
+# ==========================================
+# RUN
+# ==========================================
+
+if __name__ == "__main__":
+    ngay = input("Nhập ngày cần kiểm tra, ví dụ 01/12/2025: ").strip()
+    check_files_by_date(ngay)
